@@ -18,29 +18,6 @@ def plot_flows_and_times_msa(flows, times, title_suffix=""):
     plt.tight_layout()
     plt.show()
 
-def plot_network_with_values(network, flows, times, show_labels=True, node_size=300):
-
-    G = nx.DiGraph()
-    for i in range(len(network.sn)):
-        G.add_edge(network.sn[i], network.en[i])
-
-    if network.node_coords:
-        pos = {node: (x, y) for node, (x, y) in network.node_coords.items()}
-    else:
-        pos = nx.spring_layout(G, seed=42)
-
-    plt.figure(figsize=(10, 8))
-    nx.draw(G, pos, with_labels=show_labels, node_size=node_size, arrows=True, edge_color='gray')
-
-    edge_labels = {}
-    for i, (u, v) in enumerate(zip(network.sn, network.en)):
-        edge_labels[(u, v)] = f"f={flows[i]:.1f}\nt={times[i]:.1f}"
-
-    nx.draw_networkx_edge_labels(G, pos, edge_labels=edge_labels, font_size=8)
-
-    plt.title("Network with flows and travel times")
-    plt.axis('off')
-    plt.show()
 
 def plot_network_colormap(network, values, value_type="flow", cmap="viridis", node_size=300, show_labels=True):
 
@@ -76,69 +53,274 @@ def plot_network_colormap(network, values, value_type="flow", cmap="viridis", no
     plt.tight_layout()
     plt.show()
 
-def plot_network_colormap_2(network, values, value_type="flow", cmap="viridis", node_size=300, show_labels=True):
-    import matplotlib.patches as mpatches
+import numpy as np
+import networkx as nx
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+from typing import Dict, List, Tuple, Optional
 
-    G = nx.DiGraph()
-    for i in range(len(network.sn)):
-        G.add_edge(network.sn[i], network.en[i], value=values[i])
 
-    if network.node_coords:
-        pos = {node: (x, y) for node, (x, y) in network.node_coords.items()}
-    else:
-        pos = nx.spring_layout(G, seed=42)
-
-    fig, ax = plt.subplots(figsize=(10, 8))
-
-    # Récupérer les valeurs pour chaque arc dans l'ordre du graphe
-    edges = list(G.edges())
-    edge_values = [G[u][v]['value'] for u, v in edges]
-
-    # Dessiner les noeuds normaux
-    all_nodes = set(network.sn) | set(network.en)
-    O_nodes = set(network.on)
-    D_nodes = set(network.dn)
-    other_nodes = all_nodes - O_nodes - D_nodes
-
-    # Noeuds origine (O) en rouge
-    nx.draw_networkx_nodes(G, pos, nodelist=list(O_nodes), node_color='red', node_size=node_size*1.5, ax=ax, label='Origin (O)')
-    # Noeuds destination (D) en bleu
-    nx.draw_networkx_nodes(G, pos, nodelist=list(D_nodes), node_color='blue', node_size=node_size*1.5, ax=ax, label='Destination (D)')
-    # Autres noeuds en gris
-    nx.draw_networkx_nodes(G, pos, nodelist=list(other_nodes), node_color='gray', node_size=node_size, ax=ax, label='Other')
-
+def plot_network_colormap(
+    network,
+    values: np.ndarray,
+    value_type: str = "flow",
+    cmap: str = "viridis",
+    node_size: int = 300,
+    show_labels: bool = True,
+    show_od_annotations: bool = False,
+    figsize: Tuple[int, int] = (12, 9)
+):
+    """
+    Visualise un réseau de transport avec une colormap pour les arcs.
+    
+    Args:
+        network: Objet réseau contenant sn, en, on, dn, q_od, node_coords
+        values: Valeurs à afficher sur les arcs (flux, coûts, etc.)
+        value_type: Type de valeur affichée (pour le label)
+        cmap: Colormap matplotlib
+        node_size: Taille des nœuds
+        show_labels: Afficher les labels des nœuds
+        show_od_annotations: Afficher les annotations O/D sur les nœuds
+        figsize: Taille de la figure
+    """
+    # 1. Construction du graphe
+    G = _build_graph(network, values)
+    
+    # 2. Calcul des positions
+    pos = _get_node_positions(network, G)
+    
+    # 3. Classification des nœuds
+    node_groups = _classify_nodes(network, G)
+    
+    # 4. Calcul des statistiques O/D
+    od_stats = _compute_od_statistics(network, node_groups)
+    
+    # 5. Création de la figure
+    fig, ax = plt.subplots(figsize=figsize)
+    
+    # 6. Dessin des éléments
+    _draw_nodes(G, pos, node_groups, node_size, ax)
+    _draw_edges(G, pos, cmap, ax)
+    
     if show_labels:
         nx.draw_networkx_labels(G, pos, font_size=10, ax=ax)
-
-    # Dessiner les arcs avec la colormap
-    lc = nx.draw_networkx_edges(
-        G, pos, edgelist=edges, edge_color=edge_values, edge_cmap=plt.get_cmap(cmap),
-        width=2, arrows=True, arrowstyle='-|>', connectionstyle='arc3,rad=0.15', ax=ax
+    
+    if show_od_annotations:
+        _draw_od_annotations(pos, node_groups, od_stats, ax)
+    
+    # 7. Ajout de la colorbar
+    _add_colorbar(G, cmap, value_type, fig, ax)
+    
+    # 8. Légende améliorée
+    _add_enhanced_legend(ax, od_stats, show_od_annotations)
+    
+    # 9. Finalisation
+    ax.set_title(
+        f"Network {value_type} visualization",
+        fontsize=14,
+        fontweight='bold',
+        pad=20
     )
-
-    # Ajouter la colorbar
-    sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(vmin=min(edge_values), vmax=max(edge_values)))
-    sm.set_array([])
-    cbar = fig.colorbar(sm, ax=ax)
-    cbar.set_label(f"Link {value_type}")
-
-    # Annoter les origines et destinations avec la somme des demandes
-    for o in O_nodes:
-        total_out = np.sum(network.q_od[network.on == o])
-        ax.annotate(f"O\n{total_out:.0f}", pos[o], color='red', fontsize=11, fontweight='bold', ha='center', va='center', xytext=(0, 18), textcoords='offset points')
-    for d in D_nodes:
-        total_in = np.sum(network.q_od[network.dn == d])
-        ax.annotate(f"D\n{total_in:.0f}", pos[d], color='blue', fontsize=11, fontweight='bold', ha='center', va='center', xytext=(0, -18), textcoords='offset points')
-
-    # Légende personnalisée
-    legend_handles = [
-        mpatches.Patch(color='red', label='Origin (O)'),
-        mpatches.Patch(color='blue', label='Destination (D)'),
-        mpatches.Patch(color='gray', label='Other node')
-    ]
-    ax.legend(handles=legend_handles, loc='upper left')
-
-    ax.set_title(f"Network {value_type} colormap\n(O: origin, D: destination, value: total demand)")
-    plt.axis('off')
+    ax.axis('off')
     plt.tight_layout()
     plt.show()
+
+
+def _build_graph(network, values: np.ndarray) -> nx.DiGraph:
+    """Construit le graphe dirigé avec les valeurs sur les arcs."""
+    G = nx.DiGraph()
+    for i, (start, end) in enumerate(zip(network.sn, network.en)):
+        G.add_edge(start, end, value=values[i])
+    return G
+
+
+def _get_node_positions(network, G: nx.DiGraph) -> Dict:
+    """Récupère ou calcule les positions des nœuds."""
+    if hasattr(network, 'node_coords') and network.node_coords:
+        return {node: (x, y) for node, (x, y) in network.node_coords.items()}
+    return nx.spring_layout(G, seed=42, k=2, iterations=50)
+
+
+def _classify_nodes(network, G: nx.DiGraph) -> Dict[str, set]:
+    """Classifie les nœuds en origines, destinations et autres."""
+    all_nodes = set(G.nodes())
+    o_nodes = set(network.on)
+    d_nodes = set(network.dn)
+    other_nodes = all_nodes - o_nodes - d_nodes
+    
+    return {
+        'origin': o_nodes,
+        'destination': d_nodes,
+        'other': other_nodes
+    }
+
+
+def _compute_od_statistics(network, node_groups: Dict) -> Dict:
+    """Calcule les statistiques agrégées pour les O/D."""
+    stats = {
+        'total_origin_demand': 0,
+        'total_destination_demand': 0,
+        'origin_details': {},
+        'destination_details': {}
+    }
+    
+    # Statistiques par origine
+    for o in node_groups['origin']:
+        demand = np.sum(network.q_od[network.on == o])
+        stats['origin_details'][o] = demand
+        stats['total_origin_demand'] += demand
+    
+    # Statistiques par destination
+    for d in node_groups['destination']:
+        demand = np.sum(network.q_od[network.dn == d])
+        stats['destination_details'][d] = demand
+        stats['total_destination_demand'] += demand
+    
+    return stats
+
+
+def _draw_nodes(G, pos, node_groups, node_size, ax):
+    """Dessine les nœuds avec des styles différents selon leur type."""
+    # Origines en rouge
+    nx.draw_networkx_nodes(
+        G, pos,
+        nodelist=list(node_groups['origin']),
+        node_color='#E74C3C',  # Rouge vif
+        node_size=node_size * 1.5,
+        node_shape='s',  # Carré pour les origines
+        edgecolors='black',
+        linewidths=2,
+        ax=ax
+    )
+    
+    # Destinations en bleu
+    nx.draw_networkx_nodes(
+        G, pos,
+        nodelist=list(node_groups['destination']),
+        node_color='#3498DB',  # Bleu vif
+        node_size=node_size * 1.5,
+        node_shape='D',  # Diamant pour les destinations
+        edgecolors='black',
+        linewidths=2,
+        ax=ax
+    )
+    
+    # Autres nœuds en gris
+    nx.draw_networkx_nodes(
+        G, pos,
+        nodelist=list(node_groups['other']),
+        node_color='#95A5A6',  # Gris
+        node_size=node_size,
+        node_shape='o',  # Cercle
+        edgecolors='black',
+        linewidths=1,
+        ax=ax
+    )
+
+
+def _draw_edges(G, pos, cmap, ax):
+    """Dessine les arcs avec la colormap."""
+    edges = list(G.edges())
+    edge_values = [G[u][v]['value'] for u, v in edges]
+    
+    nx.draw_networkx_edges(
+        G, pos,
+        edgelist=edges,
+        edge_color=edge_values,
+        edge_cmap=plt.get_cmap(cmap),
+        width=2.5,
+        arrows=True,
+        arrowstyle='-|>',
+        arrowsize=15,
+        connectionstyle='arc3,rad=0.15',
+        ax=ax
+    )
+
+
+def _draw_od_annotations(pos, node_groups, od_stats, ax):
+    """Ajoute les annotations de demande sur les nœuds O/D."""
+    # Annotations origines
+    for o in node_groups['origin']:
+        demand = od_stats['origin_details'][o]
+        ax.annotate(
+            f"{demand:.0f}",
+            pos[o],
+            color='#C0392B',
+            fontsize=9,
+            fontweight='bold',
+            ha='center',
+            va='center',
+            xytext=(0, 20),
+            textcoords='offset points',
+            bbox=dict(boxstyle='round,pad=0.3', facecolor='white', edgecolor='#E74C3C', alpha=0.8)
+        )
+    
+    # Annotations destinations
+    for d in node_groups['destination']:
+        demand = od_stats['destination_details'][d]
+        ax.annotate(
+            f"{demand:.0f}",
+            pos[d],
+            color='#2874A6',
+            fontsize=9,
+            fontweight='bold',
+            ha='center',
+            va='center',
+            xytext=(0, -20),
+            textcoords='offset points',
+            bbox=dict(boxstyle='round,pad=0.3', facecolor='white', edgecolor='#3498DB', alpha=0.8)
+        )
+
+
+def _add_colorbar(G, cmap, value_type, fig, ax):
+    """Ajoute la colorbar pour les valeurs des arcs."""
+    edges = list(G.edges())
+    edge_values = [G[u][v]['value'] for u, v in edges]
+    
+    sm = plt.cm.ScalarMappable(
+        cmap=cmap,
+        norm=plt.Normalize(vmin=min(edge_values), vmax=max(edge_values))
+    )
+    sm.set_array([])
+    cbar = fig.colorbar(sm, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label(f"Link {value_type}", fontsize=11, fontweight='bold')
+
+
+def _add_enhanced_legend(ax, od_stats, show_annotations):
+    """Ajoute une légende enrichie avec les statistiques O/D."""
+    legend_elements = [
+        mpatches.Patch(
+            facecolor='#E74C3C',
+            edgecolor='black',
+            linewidth=2,
+            label=f"Origin (□) - Total demand: {od_stats['total_origin_demand']:.0f}"
+        ),
+        mpatches.Patch(
+            facecolor='#3498DB',
+            edgecolor='black',
+            linewidth=2,
+            label=f"Destination (◇) - Total demand: {od_stats['total_destination_demand']:.0f}"
+        ),
+        mpatches.Patch(
+            facecolor='#95A5A6',
+            edgecolor='black',
+            label="Intermediate node (○)"
+        )
+    ]
+    
+    if show_annotations:
+        legend_elements.append(
+            mpatches.Patch(
+                facecolor='white',
+                edgecolor='gray',
+                label="Numbers = node demand"
+            )
+        )
+    
+    ax.legend(
+        handles=legend_elements,
+        loc='upper left',
+        fontsize=10,
+        framealpha=0.95,
+        edgecolor='black'
+    )

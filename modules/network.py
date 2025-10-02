@@ -2,14 +2,14 @@ from modules import *
 
 class Network:
     def __init__(self, sn, en, t0, C, on, dn, q_od, node_coords=None):
-        self.sn = sn  # start nodes
-        self.en = en  # end nodes
-        self.t0 = t0  # free flow times
-        self.C = C    # capacities
-        self.on = on  # origins
-        self.dn = dn  # destinations
-        self.q_od = q_od  # OD demands
-        self.node_coords = node_coords  # Optional: node coordinates
+        self.sn = sn
+        self.en = en
+        self.t0 = t0
+        self.C = C
+        self.on = on
+        self.dn = dn
+        self.q_od = q_od
+        self.node_coords = node_coords
 
     def summary(self):
         print(f"Network: {len(self.sn)} links, {len(set(self.sn) | set(self.en))} nodes, {len(self.on)} OD pairs")
@@ -26,7 +26,7 @@ class Network:
         nx.draw(G, pos, with_labels=with_labels, node_size=node_size, arrows=True)
         plt.title("Network visualization")
         plt.show()
-
+   
 def load_network(name):
     if name == "toy":
         BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

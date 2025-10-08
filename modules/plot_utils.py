@@ -324,3 +324,38 @@ def _add_enhanced_legend(ax, od_stats, show_annotations):
         framealpha=0.95,
         edgecolor='black'
     )
+
+def plot_lam_vs_num(q_lam, t_lam, q_num, t_num, network, network_name):
+
+    n = len(network.sn)
+    fig, axs = plt.subplots(1, 2, figsize=(12, 5))
+    axs[0].plot(np.arange(1, n+1), q_lam, '-o', label='Analytical flow')
+    axs[0].plot(np.arange(1, n+1), q_num, '-x', label='Numerical flow')
+    axs[0].set_title('Links flow on ' + network_name + ' network')
+    axs[0].legend()
+    axs[0].grid(True)
+
+    # Deuxième graphique : Temps
+    axs[1].plot(np.arange(1, n+1), t_lam, '-o', label='Analytical travel time')
+    axs[1].plot(np.arange(1, n+1), t_num, '-x', label='Numerical travel time')
+    axs[1].set_title('Links travel time on ' + network_name + ' network')
+    axs[1].legend()
+    axs[1].grid(True)
+
+    plt.tight_layout()
+    plt.show()
+
+def compute_errors(y_true, y_pred, label=""):
+
+    rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+    mae = mean_absolute_error(y_true, y_pred)
+    r2 = r2_score(y_true, y_pred)
+    mape = np.mean(np.abs((y_true - y_pred) / (y_true + 1e-8))) * 100  # éviter division par 0
+    
+    print(f"\n--- {label} ---")
+    print(f"RMSE : {rmse:.4f}")
+    print(f"MAE  : {mae:.4f}")
+    print(f"MAPE : {mape:.2f} %")
+    print(f"R²   : {r2:.4f}")
+    
+    return {"RMSE": rmse, "MAE": mae, "MAPE": mape, "R2": r2}

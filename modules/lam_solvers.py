@@ -1,8 +1,10 @@
 from modules import *
+import modules.cost_functions as cf
 
 def build_gamma_matrix(path_list, network):
     """Construit la matrice gamma (m x p) reliant OD aux chemins."""
-    m = network.m   # total ODs
+    n = len(network.sn) # total links
+    m = len(network.on) # total ODs
     p = sum(len(k) for k in path_list) # total paths
 
     gamma = np.zeros((m, p))
@@ -14,8 +16,8 @@ def build_gamma_matrix(path_list, network):
 
 def build_delta_matrix(path_list, network, G):
     """Construit la matrice delta (n x p) reliant liens aux chemins."""
-    m = network.m   # total ODs
-    n = network.n   # total links
+    n = len(network.sn) # total links
+    m = len(network.on) # total ODs
     p = sum(len(k) for k in path_list) # total paths
 
     delta = np.zeros((n, p))
@@ -32,8 +34,8 @@ def build_delta_matrix(path_list, network, G):
 
 def build_T_matrix(path_list, network, G):
     """Construit la matrice T (p-m x n) pour les différences entre chemins."""
-    m = network.m   # total ODs
-    n = network.n   # total links
+    n = len(network.sn) # total links
+    m = len(network.on) # total ODs
     p = sum(len(k) for k in path_list) # total paths
     
     T = np.zeros((p - m, n))
@@ -78,15 +80,15 @@ def extract_multiple_indices(path_list, delta):
         "od_m": multiple_od_indices,
         "paths_m": multiple_path_indices,
         "links_m": multiple_link_indices,
-        "m": len(multiple_od_indices),
-        "p": len(multiple_path_indices),
-        "n": len(multiple_link_indices)
+        "m_m": len(multiple_od_indices),
+        "p_m": len(multiple_path_indices),
+        "n_m": len(multiple_link_indices)
     }
 
 
 def build_gamma_m_matrix(gamma, indices):
     """ Construit la matrice gamma réduite aux ODs et chemins multiples. """
-    gamma_m = np.zeros((indices['m'], indices['p']))
+    gamma_m = np.zeros((indices['m_m'], indices['p_m']))
     for i_local, i_global in enumerate(indices['od_m']):
         for j_local, j_global in enumerate(indices['paths_m']):
             gamma_m[i_local, j_local] = gamma[i_global, j_global]
@@ -94,75 +96,53 @@ def build_gamma_m_matrix(gamma, indices):
 
 
 def build_delta_m_matrix(delta, indices):
-    delta_m = np.zeros((indices['n'], indices['p']))
+    delta_m = np.zeros((indices['n_m'], indices['p_m']))
     for i_local, i_global in enumerate(indices['links_m']):
         for j_local, j_global in enumerate(indices['paths_m']):
             delta_m[i_local, j_local] = delta[i_global, j_global]
     return delta_m
     
 
-def build_delta_m_u_matrix(delta, gamma_m, delta_m, indices):
-    p = delta.shape[1]
-    m_multiple = gamma_m.shape[0]
-    
-    delta_m2 = []
-    delta_m_copy = delta_m.copy()
-    multiple_link_indices_copy = indices['links_m'].copy()
-    
-    i = 0
-    while i < len(multiple_link_indices_copy):
-        A = np.vstack([delta_m_copy[i, :], gamma_m])
-        
-        if np.linalg.matrix_rank(A) < m_multiple + 1:
-            delta_m2.append(delta_m_copy[i, :].copy())
-            delta_m_copy = np.delete(delta_m_copy, i, axis=0)
-            multiple_link_indices_copy = np.delete(multiple_link_indices_copy, i)
-        else:
-            i += 1
-    
-    # Indices des colonnes uniques (complémentaires aux chemins multiples)
-    cols_u = sorted(set(range(p)) - set(indices['paths_m']))
-    delta_m_u = delta[np.ix_(multiple_link_indices_copy, cols_u)]
-    
-    # Mise à jour du dictionnaire d'indices avec les liens finaux
-    indices_updated = indices.copy()
-    indices_updated['links_m'] = multiple_link_indices_copy
-    indices_updated['n'] = len(multiple_link_indices_copy)
-    
-    return delta_m_u, delta_m2, indices_updated
+def build_delta_m_delta_mu_delta_um(delta, delta_m,gamma_m, indices, network, path_list):
+
+    n = len(network.sn)
+    p = sum(len(k) for k in path_list)
+    n_m = indices["n_m"]
+    m_m = indices["m_m"]
+    p_m = indices["p_m"]
+    links_m = indices["links_m"]
+    paths_m = indices["paths_m"]
+
+    delta_u_m = np.zeros((n-n_m,m_m))
+    delta_uu = []
+    i = 0     
+
+    while i < len(links_m):
+
+            A = np.vstack([delta_m[i, :], gamma_m])
+                
+            if np.linalg.matrix_rank(A) < m_m + 1:
+                    delta_uu.append(delta_m[i, :].copy())
+                    delta_m = np.delete(delta_m, i, axis=0)     
+                    links_m = np.delete(links_m, i)             
+            else:
+                    i += 1
+
+    final_indices = indices
+    final_indices["links_m"] = links_m
+    final_indices["m_m"] = len(links_m)
 
 
-def build_delta_u_m_matrix(path_list, network, G):
+    cols_u = list(set(range(p)) - set(paths_m))
+    cols_u.sort() 
+    delta_m_u = delta[np.ix_(links_m, cols_u)] 
 
-    # Construction des matrices de base
-    gamma = build_gamma_matrix(path_list, network)
-    delta = build_delta_matrix(path_list, network, G)
-    
-    # Identification des indices multiples
-    indices = extract_multiple_indices(path_list, delta)
-    
-    # Construction des matrices réduites
-    gamma_m = build_gamma_m_matrix(gamma, indices)
-    delta_m = build_delta_m_matrix(delta, indices)
-    
-    # Construction de delta_m_u et récupération des indices finaux
-    delta_m_u, delta_m2, indices_final = build_delta_m_u_matrix(
-        delta, gamma_m, delta_m, indices
-    )
-    
-    # Construction de la matrice finale
-    n = network.n
-    n_remaining = n - indices_final['n']
-    p_multiple = indices_final['p']
-    
-    delta_u_m = np.zeros((n_remaining, p_multiple))
-    
-    if len(delta_m2) > 0:
-        delta_m2 = np.array(delta_m2)
-        delta_u_m_top = (pinv(gamma_m.T) @ delta_m2.T).T
-        delta_u_m = np.vstack([delta_u_m_top, delta_u_m])
-    
-    return delta_u_m, indices_final
+    delta_uu = np.array(delta_uu)
+    delta_u_m_top = (pinv(gamma_m.T) @ delta_uu.T).T
+    delta_u_m = np.vstack([delta_u_m_top, delta_u_m])
+
+    return delta_m, delta_m_u, delta_u_m, final_indices 
+
 
 # ---------- UTILITAIRES ----------
 def simplify_binary(mat, tol=1e-8):
@@ -171,40 +151,140 @@ def simplify_binary(mat, tol=1e-8):
     return binary_mat
 # ---------- ----- ----------
 
-from numpy.linalg import matrix_rank
-from scipy.linalg import null_space, pinv
-from sympy import Matrix
 
-def compute_Rr_and_r0(delta_m, gamma_m, indices_final, network):
+def rref(M):
+    M_sym = Matrix(M)
+    M1_sym, _ = M_sym.rref()
+    M_rref = np.array(M1_sym, dtype=np.float64)
+    rank_M = np.linalg.matrix_rank(M)
+    M_rref = M_rref[:rank_M, :]
+    return M_rref, rank_M
+
+def build_A_Rr_and_r0(delta_m, gamma_m, final_indices, network):
     """ Construit les matrices Rr et r0 pour la réduction dimensionnelle. """
-    # Réduction en forme échelonnée
-    delta_m_sym = Matrix(delta_m)
-    delta_m_rref, _ = delta_m_sym.rref()
-    delta_m_tilde = np.array(delta_m_rref, dtype=np.float64)
 
-    rank_delta_m = matrix_rank(delta_m)
-    delta_m_tilde = delta_m_tilde[:rank_delta_m, :]
+    delta_m_tilde, rank_delta_m = rref(delta_m)
 
     # Nullspace binaire
     M_for_null = (delta_m_tilde - pinv(gamma_m @ pinv(delta_m_tilde)) @ gamma_m).T
     ns = null_space(M_for_null)
-
-    if ns.size == 0:
-        A = np.zeros((0, M_for_null.shape[0]))
-    else:
-        A = simplify_binary(ns).T
+    A = simplify_binary(ns).T
 
     # Matrice Rr
     Rr = A @ pinv(gamma_m @ pinv(delta_m_tilde))
 
     # Extraction de q_od restreint (OD multiples uniquement)
-    q_od_r = np.array(network.q_od)[indices_final['od_m']].reshape(-1, 1)
-    r0 = Rr @ q_od_r
+    q_od_m = np.array(network.q_od)[final_indices['od_m']].reshape(-1, 1)
+    r0 = Rr @ q_od_m
 
+    return A, Rr, r0, q_od_m
+
+def build_B_q0(delta_m,delta_m_tilde, delta_m_u, network, final_indices):
+    m = len(network.q_od)
+    q_od = network.q_od
+    od_m = final_indices["od_m"]
+    q_od_u = np.array(q_od)[list(set(range(m)) - set(od_m))]
+    q_od_u = q_od_u.reshape(-1,1)
+
+    B = delta_m @ pinv(delta_m_tilde)
+    q0 = delta_m_u @ q_od_u
+    return B, q0, q_od_u
+
+def build_T_m(T, final_indices):
+    links_m = final_indices["links_m"]
+    T = T[:,links_m]
+    T_m, rank_T_m = rref(T)
+    return T_m
+
+def extract_dimensions(delta_m, delta_m_tilde, A, T_m):
+    n1 = delta_m.shape[0]
+    r1 = delta_m_tilde.shape[0]
+    s1 = A.shape[0]
+    u1 = T_m.shape[0]
+
+    if u1 + s1 != r1:
+        raise ValueError(
+            f"Erreur : u1 + s1 ≠ r1 (u1={u1}, r1={r1}, s1={s1})"
+        )
     return {
-        "delta_r_prime": delta_m_tilde,
-        "rank_delta_r": rank_delta_m,
-        "A_r": A,
-        "Rr": Rr,
-        "r0": r0
+        "n1": n1,   
+        "r1": r1,   
+        "s1": s1,   
+        "u1": u1   
     }
+
+def _reconstruct_full_solution(q_m, t_m, network, delta, final_indices, t0_lin, K, delta_u_m, q_od_u, q_od_m):
+    
+    n = len(network.sn)
+    p = delta.shape[1]
+    
+    links_m = final_indices["links_m"]
+    paths_m = final_indices["paths_m"]
+    
+    links_u = sorted(list(set(range(n)) - set(links_m)))
+    paths_u = sorted(list(set(range(p)) - set(paths_m)))
+    delta_u = delta[np.ix_(links_u, paths_u)]
+    
+    q_u = delta_u @ q_od_u + delta_u_m @ q_od_m
+    t_u = t0_lin[links_u].reshape(-1, 1) + K[np.ix_(links_u, links_u)] @ q_u
+    
+    lam_flows = np.zeros((n, 1))
+    lam_flows[links_m] = q_m
+    lam_flows[links_u] = q_u
+    
+    lam_times = np.zeros((n, 1))
+    lam_times[links_m] = t_m
+    lam_times[links_u] = t_u
+    
+    return lam_flows.flatten(), lam_times.flatten()
+    
+def lam_solver_linear_system(network, final_indices, dimensions, alpha, beta, eps, A, T_m, B, r0, q0, delta, delta_u_m, q_od_u, q_od_m):
+
+    t0, C = network.t0, network.C
+    t0_lin, K = cf.linearised_bpr_matrices(t0, C, alpha, beta, eps)
+    links_m = final_indices["links_m"]
+    n1, r1, s1, u1 = dimensions["n1"], dimensions["r1"], dimensions["s1"], dimensions["u1"]
+    K_m = K[np.ix_(links_m, links_m)]
+    t0_lin_m = t0_lin[links_m].reshape(-1, 1)
+
+    M = np.block([
+    [A,                np.zeros((s1, 2*n1))],
+    [np.zeros((u1, r1+n1)), T_m],
+    [-B,               np.eye(n1), np.zeros((n1, n1))],
+    [np.zeros((n1, r1)), -K_m,       np.eye(n1)]
+    ])
+
+    y = np.vstack([r0,np.zeros((u1, 1)), q0, t0_lin_m])
+
+    x = solve(M,y)
+
+    r = x[:r1]
+    q_m = x[r1:r1+n1]
+    t_m= x[r1+n1:]
+
+    return _reconstruct_full_solution(q_m, t_m, network, delta, final_indices, t0_lin, K, delta_u_m, q_od_u, q_od_m)
+
+def lam_solver_qp(network, final_indices, dimensions, alpha, beta, eps, A, B, q0, r0, delta, delta_u_m, q_od_u, q_od_m):
+
+    t0, C = network.t0, network.C
+    t0_lin, K = cf.linearised_bpr_matrices(t0, C, alpha, beta, eps)
+    n1, r1, s1, u1 = dimensions["n1"], dimensions["r1"], dimensions["s1"], dimensions["u1"]
+    links_m = final_indices["links_m"]
+    t0_lin_m = t0_lin[links_m].reshape(-1, 1)
+    K_m = K[np.ix_(links_m, links_m)]
+
+    M_top = np.hstack([B.T @ K_m @ B, A.T])
+    M_bottom = np.hstack([A, np.zeros((s1, s1))])
+    M = np.vstack([M_top, M_bottom])  
+
+    y_top = - B.T @ K_m @ q0 - B.T @ t0_lin_m
+    y_bottom = r0
+    y = np.vstack([y_top, y_bottom])  
+
+    x = solve(M, y)
+
+    r = x[:r1]
+    q_m = B @ r + q0
+    t_m = t0_lin_m + K_m @ q_m
+
+    return _reconstruct_full_solution(q_m, t_m, network, delta, final_indices, t0_lin, K, delta_u_m, q_od_u, q_od_m)

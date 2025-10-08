@@ -81,5 +81,5 @@ def MSA_solver(network, N_iter, tol, alpha, beta, linearize_bpr, eps=None):
     if it == N_iter - 1:
         print(f"Convergence non atteinte après {N_iter} itérations, écart = {gap:.6f}")
 
-    return path_list, V, compute_travel_times(V)
+    return path_list, V, compute_travel_times(V), G
 

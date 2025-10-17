@@ -17,7 +17,6 @@ def MSA_solver(network, N_iter, tol, alpha, beta, linearize_bpr, eps=None):
     n = len(sn)  # nombre d'arcs
     m = len(on)  # nombre de paires OD
     V = np.zeros(n)  # flux initial sur les arcs
-    tol = 1e-5
 
     # Chemins à chaque itération
     L = [None for _ in range(m)]       # Chemin courant pour chaque OD
@@ -30,9 +29,9 @@ def MSA_solver(network, N_iter, tol, alpha, beta, linearize_bpr, eps=None):
 
     def compute_travel_times(V, linearize_bpr=False):
         if linearize_bpr == False : 
-            return cf.bpr_function(V, t0, C, alpha=alpha, beta=beta)
+            return cf.bpr_function(V, t0, C, alpha, beta)
         else : 
-            return cf.linearised_bpr_function(V, t0, C, alpha=alpha, beta=4, eps=eps)
+            return cf.linearised_bpr_function(V, t0, C, alpha, beta, eps)
         
     def all_or_nothing_assignment(times):
         """ Charge les flux sur les plus courts chemins pour chaque OD et stocke les chemins """

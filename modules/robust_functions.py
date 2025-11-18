@@ -81,7 +81,7 @@ def robust_solve(A, b, method='auto'):
                     warnings.warn(f"[robust_solve] Matrice très mal conditionnée (cond={cond:.2e}), régularisation.")
         except Exception:
             method = 'lstsq'
-
+    print("conditonnement de A", cond, "method used : ", method)
     # Résolution selon la méthode
     try:
         if method == 'direct':
@@ -115,15 +115,15 @@ import warnings
 
 class RobustnessConfig:
     """Configuration centralisée des paramètres de robustesse numérique."""
-    RCOND_PINV = 1e-5          # Tolérance pseudo-inverse (vs 1e-15 défaut Python)
-    RCOND_SVD = 1e-5           # Tolérance SVD
+    RCOND_PINV = 1e-3          # Tolérance pseudo-inverse (vs 1e-15 défaut Python)
+    RCOND_SVD = 1e-2           # Tolérance SVD
     THRESHOLD_CLEAN = 1e-5     # Seuil de nettoyage (comme Dr(abs(Dr)<1e-3)=0 MATLAB)
-    THRESHOLD_RREF = 1e-5      # Tolérance pour RREF
-    THRESHOLD_RANK = 1e-5      # Tolérance pour le calcul de rang
-    MAX_CONDITION = 1e12        # Numéro de condition maximal acceptable
+    THRESHOLD_RREF = 1e-4      # Tolérance pour RREF
+    THRESHOLD_RANK = 1e-4      # Tolérance pour le calcul de rang
+    MAX_CONDITION = 1e12       # Numéro de condition maximal acceptable
     
     # Paramètres de diagnostic
-    VERBOSE = False
+    VERBOSE = True
     DIAGNOSTICS = True
 
 
@@ -174,7 +174,7 @@ def diagnose_matrix(A, name="Matrix"):
     diagnostics['max_sv'] = s[0] if len(s) > 0 else 0
     diagnostics['num_small_sv'] = np.sum(s < RobustnessConfig.THRESHOLD_CLEAN)
     
-    if RobustnessConfig.VERBOSE:
+    if RobustnessConfig.VERBOSE == True:
         print(f"\n=== Diagnostics: {name} ===")
         print(f"Shape: {diagnostics['shape']}")
         print(f"Rank: {diagnostics['rank']}")

@@ -1,17 +1,21 @@
-from scipy.linalg import pinv as scipy_pinv
-from numpy.linalg import pinv as numpy_pinv
 import numpy as np
 import warnings
+from scipy.linalg import null_space
 from sympy import Matrix
+
 import modules.cost_functions as cf
-from modules.robust_functions import clean_matrix, diagnose_matrix, RobustnessConfig, robust_pinv, robust_null_space, robust_solve
+from modules.robust_functions import (
+    clean_matrix, 
+    RobustnessConfig, 
+    robust_pinv, 
+    robust_solve
+)
 
 
 # ========== MATRICES DE BASE ==========
 
 def build_gamma_matrix(path_list, network):
     """Construit la matrice γ (m x p) reliant OD aux chemins."""
-    n = len(network.sn)
     m = len(network.on)
     p = sum(len(k) for k in path_list)
 
@@ -20,7 +24,8 @@ def build_gamma_matrix(path_list, network):
     for i, start in enumerate(col_start):
         gamma[i, start:start+len(path_list[i])] = 1
     
-    return clean_matrix(gamma)
+    print("Gamma :", gamma)
+    return gamma
 
 
 def build_delta_matrix(path_list, network, G):
@@ -39,7 +44,8 @@ def build_delta_matrix(path_list, network, G):
                 delta[arc_index, nn + j] = 1
         nn += len(path_list[i])
     
-    return clean_matrix(delta)
+    print("Delta :", delta)
+    return delta
 
 
 def build_T_matrix(path_list, network, G):
@@ -67,7 +73,7 @@ def build_T_matrix(path_list, network, G):
 
         nn += len(path_list[i]) - 1
     
-    return clean_matrix(T)
+    return T
 
 
 # ========== EXTRACTION ET RÉDUCTION ==========
@@ -87,7 +93,9 @@ def extract_multiple_indices(path_list, delta):
     
     multiple_od_indices = np.array(multiple_od_indices)
     multiple_path_indices = np.array(multiple_path_indices)
-    multiple_link_indices = np.where(np.sum(delta[:, multiple_path_indices], axis=1) > 0)[0]
+    multiple_link_indices = np.where(
+        np.sum(delta[:, multiple_path_indices], axis=1) > 0
+    )[0]
     
     return {
         "od_m": multiple_od_indices,
@@ -105,7 +113,7 @@ def build_gamma_m_matrix(gamma, indices):
     for i_local, i_global in enumerate(indices['od_m']):
         for j_local, j_global in enumerate(indices['paths_m']):
             gamma_m[i_local, j_local] = gamma[i_global, j_global]
-    return clean_matrix(gamma_m)
+    return gamma_m
 
 
 def build_delta_m_matrix(delta, indices):
@@ -114,198 +122,106 @@ def build_delta_m_matrix(delta, indices):
     for i_local, i_global in enumerate(indices['links_m']):
         for j_local, j_global in enumerate(indices['paths_m']):
             delta_m[i_local, j_local] = delta[i_global, j_global]
-    return clean_matrix(delta_m)
-    
+    return delta_m
+
 
 def build_delta_m_delta_mu_delta_um(delta, delta_m, gamma_m, indices, network, path_list):
     """
     Construit les matrices δ réduites et élimine les lignes linéairement dépendantes.
-    
-    Cette fonction implémente la logique MATLAB (linaff.m lignes 64-74) pour détecter
-    et supprimer les lignes de δ_m qui sont linéairement dépendantes de γ_m.
-    
-    C'est CRITIQUE pour la robustesse du système.
     """
     n = len(network.sn)
     p = sum(len(k) for k in path_list)
+    
     n_m = indices["n_m"]
     m_m = indices["m_m"]
-    p_m = indices["p_m"]
     links_m = indices["links_m"].copy()
     paths_m = indices["paths_m"]
-
-    delta_u_m = np.zeros((n-n_m, m_m))
-    delta_uu = []
+    
+    delta_uu_rows = []
+    eliminated_links_indices = []
+    
     i = 0
-
-    # Élimination des dépendances linéaires (comme MATLAB)
     while i < len(links_m):
-        # Former la matrice augmentée [δ_m[i,:]; γ_m]
         A = np.vstack([delta_m[i, :], gamma_m])
-        
-        # Tester le rang avec tolérance robuste
         rank_test = np.linalg.matrix_rank(A, tol=RobustnessConfig.THRESHOLD_RANK)
         
         if rank_test < m_m + 1:
-            # Ligne dépendante détectée
             if RobustnessConfig.VERBOSE:
                 print(f"Ligne dépendante détectée: link {links_m[i]}, rank={rank_test} < {m_m + 1}")
             
-            delta_uu.append(delta_m[i, :].copy())
+            delta_uu_rows.append(delta_m[i, :].copy())
+            eliminated_links_indices.append(links_m[i])
             delta_m = np.delete(delta_m, i, axis=0)
             links_m = np.delete(links_m, i)
         else:
             i += 1
 
-    # Nettoyer delta_m
     delta_m = clean_matrix(delta_m)
     
     final_indices = indices.copy()
     final_indices["links_m"] = links_m
     final_indices["n_m"] = len(links_m)
 
-    # Construire δ_m^u (liens multiples, chemins uniques)
-    cols_u = list(set(range(p)) - set(paths_m))
-    cols_u.sort()
+    # Construire δ_m^u
+    cols_u = sorted(list(set(range(p)) - set(paths_m)))
     delta_m_u = delta[np.ix_(links_m, cols_u)]
     delta_m_u = clean_matrix(delta_m_u)
 
-    # Construire δ_u^m (liens uniques, chemins multiples)
-    if len(delta_uu) > 0:
-        delta_uu = np.array(delta_uu)
-        # Utiliser robust_pinv au lieu de pinv standard
-        delta_u_m_top = (robust_pinv(gamma_m.T) @ delta_uu.T).T
-        delta_u_m_top = clean_matrix(delta_u_m_top)
+    # Reconstruction de delta_u_m
+    all_links_indices = set(range(n))
+    links_m_set = set(links_m)
+    links_u = sorted(list(all_links_indices - links_m_set))
+    final_indices["links_u"] = links_u
+
+    if len(delta_uu_rows) > 0:
+        delta_uu_rows = np.array(delta_uu_rows)
+        delta_u_m_eliminated = (robust_pinv(gamma_m.T) @ delta_uu_rows.T).T
+        delta_u_m_eliminated = clean_matrix(delta_u_m_eliminated)
     else:
-        delta_uu = np.zeros((0, delta_m.shape[1]))
-        delta_u_m_top = np.zeros((0, m_m))
+        delta_u_m_eliminated = np.zeros((0, m_m))
 
-    delta_u_m = np.vstack([delta_u_m_top, delta_u_m])
-    delta_u_m = clean_matrix(delta_u_m)
-
-    return delta_m, delta_m_u, delta_u_m, final_indices
-
-
-# ========== UTILITAIRES ==========
-
-def simplify_binary(mat, tol=None):
-    """Convertit une matrice en matrice binaire."""
-    if tol is None:
-        tol = RobustnessConfig.THRESHOLD_CLEAN
+    final_delta_u_m = np.zeros((len(links_u), m_m))
     
-    binary_mat = np.zeros_like(mat)
-    binary_mat[np.abs(mat) > tol] = 1
-    return binary_mat
+    for i, link_idx in enumerate(eliminated_links_indices):
+        row_in_final = links_u.index(link_idx)
+        final_delta_u_m[row_in_final, :] = final_delta_u_m[row_in_final, :] + delta_u_m_eliminated[i, :]
+
+    return delta_m, delta_m_u, final_delta_u_m, final_indices
 
 
 def rref(M):
-    """
-    Calcule la forme échelonnée réduite d'une matrice (RREF) de manière robuste.
-    
-    Équivalent MATLAB: [M_rref, ~] = rref(M)
-    
-    Args:
-        M: Matrice d'entrée
-    
-    Returns:
-        M_rref: Forme échelonnée réduite
-        rank_M: Rang de la matrice
-    """
-    M = clean_matrix(M)
-    
-    # Méthode 1: Via sympy (plus lente mais exacte)
+    """Calcule la forme échelonnée réduite d'une matrice."""
     try:
         M_sym = Matrix(M)
         M1_sym, _ = M_sym.rref()
-        M_rref = np.array(M1_sym, dtype=np.float64)
-    except:
-        # Fallback: implémentation manuelle
-        M_rref = _rref_manual(M)
-    
-    # Nettoyer et extraire les lignes non nulles
-    M_rref = clean_matrix(M_rref, threshold=RobustnessConfig.THRESHOLD_RREF)
-    rank_M = np.linalg.matrix_rank(M_rref, tol=RobustnessConfig.THRESHOLD_RANK)
+        M_rref = np.array(M1_sym.tolist(), dtype=np.float64)
+    except Exception as e:
+        print("rref problem:", e)
+        raise e
+
+    rank_M = np.linalg.matrix_rank(M_rref)
     M_rref = M_rref[:rank_M, :]
     
     return M_rref, rank_M
 
 
-def _rref_manual(A):
-    """Implémentation manuelle robuste de RREF (fallback)."""
-    A = A.astype(float).copy()
-    rows, cols = A.shape
-    r = 0  # Current row
-    
-    for c in range(cols):
-        if r >= rows:
-            break
-        
-        # Trouver le pivot
-        pivot_row = np.argmax(np.abs(A[r:rows, c])) + r
-        
-        if np.abs(A[pivot_row, c]) < RobustnessConfig.THRESHOLD_RREF:
-            continue
-        
-        # Échanger les lignes
-        A[[r, pivot_row]] = A[[pivot_row, r]]
-        
-        # Normaliser la ligne du pivot
-        A[r] = A[r] / A[r, c]
-        
-        # Éliminer
-        for i in range(rows):
-            if i != r and np.abs(A[i, c]) > RobustnessConfig.THRESHOLD_RREF:
-                A[i] -= A[i, c] * A[r]
-        
-        r += 1
-    
-    # Nettoyer
-    A = clean_matrix(A, threshold=RobustnessConfig.THRESHOLD_RREF)
-    
-    return A
-
-
 # ========== CONSTRUCTION DES MATRICES FINALES ==========
 
 def build_A_Rr_and_r0(delta_m, gamma_m, final_indices, network):
-    """
-    Construit les matrices A (contraintes structurelles), R_r et r_0.
-    
-    Suit la logique MATLAB pour calculer le null space et les contraintes.
-    """
-    # RREF robuste
+    """Construit les matrices A (contraintes structurelles), R_r et r_0."""
     delta_m_tilde, rank_delta_m = rref(delta_m)
-    delta_m_tilde = clean_matrix(delta_m_tilde)
-    
-    if RobustnessConfig.VERBOSE:
-        print(f"δ_m: shape={delta_m.shape}, rank={rank_delta_m}")
-        diagnose_matrix(delta_m_tilde, "δ_m_tilde")
 
-    # Calcul de D = δ̃_m - pinv(γ_m @ pinv(δ̃_m)) @ γ_m
-    # Équivalent MATLAB: D = Q1 - pinv(P*pinv(Q1))*P
-    gamma_pinv_delta_tilde = robust_pinv(gamma_m @ robust_pinv(delta_m_tilde))
+    gamma_pinv_delta_tilde = np.linalg.pinv(
+        (gamma_m @ np.linalg.pinv(delta_m_tilde)).astype(float)
+    )
     D = delta_m_tilde - gamma_pinv_delta_tilde @ gamma_m
-    D = clean_matrix(D, threshold=RobustnessConfig.THRESHOLD_CLEAN)
-    
-    if RobustnessConfig.VERBOSE:
-        diagnose_matrix(D, "D")
+    ns = null_space(D.T)
+    A = ns.T
 
-    # Null space robuste de D.T (équivalent MATLAB: null(D', 'rational'))
-    ns = robust_null_space(D)
-    A = simplify_binary(ns).T
-    A = clean_matrix(A)
-    
-    if RobustnessConfig.VERBOSE:
-        print(f"A: shape={A.shape}")
-
-    # R_r = A @ pinv(γ_m @ pinv(δ̃_m))
     R_r = A @ gamma_pinv_delta_tilde
-    R_r = clean_matrix(R_r)
 
-    # r_0 = R_r @ q^{od}_m
     q_od_m = np.array(network.q_od)[final_indices['od_m']].reshape(-1, 1)
     r_0 = R_r @ q_od_m
-    r_0 = clean_matrix(r_0)
 
     return A, R_r, r_0, q_od_m
 
@@ -318,13 +234,8 @@ def build_B_q0(delta_m, delta_m_tilde, delta_m_u, network, final_indices):
     q_od_u = np.array(q_od)[list(set(range(m)) - set(od_m))]
     q_od_u = q_od_u.reshape(-1, 1)
 
-    # B = δ_m @ pinv(δ̃_m)
-    B = delta_m @ robust_pinv(delta_m_tilde)
-    B = clean_matrix(B)
-    
-    # q_0 = δ_m^u @ q^{od}_u
+    B = delta_m @ np.linalg.pinv(delta_m_tilde)
     q_0 = delta_m_u @ q_od_u
-    q_0 = clean_matrix(q_0)
     
     return B, q_0, q_od_u
 
@@ -334,7 +245,6 @@ def build_T_m(T, final_indices):
     links_m = final_indices["links_m"]
     T = T[:, links_m]
     T_m, rank_T_m = rref(T)
-    T_m = clean_matrix(T_m)
     return T_m
 
 
@@ -346,15 +256,17 @@ def extract_dimensions(delta_m, delta_m_tilde, A, T_m):
     u1 = T_m.shape[0]
 
     if (u1 + s1 != r1) and (s1 != 0):
-        warnings.warn(f"Dimensions non cohérentes: u1 + s1 ≠ r1 (u1={u1}, r1={r1}, s1={s1})")
-        # Ne pas lever d'erreur, continuer avec un avertissement
+        warnings.warn(
+            f"Dimensions non cohérentes: u1 + s1 ≠ r1 (u1={u1}, r1={r1}, s1={s1})"
+        )
     
     return {"n1": n1, "r1": r1, "s1": s1, "u1": u1}
 
 
 # ========== RECONSTRUCTION ==========
 
-def _reconstruct_full_solution(q_m, t_m, network, delta, final_indices, t0_lin, K, delta_u_m, q_od_u, q_od_m):
+def _reconstruct_full_solution(q_m, t_m, network, delta, final_indices, 
+                               t0_lin, K, delta_u_m, q_od_u, q_od_m):
     """Reconstruit la solution complète à partir des variables réduites."""
     n = len(network.sn)
     p = delta.shape[1]
@@ -362,31 +274,37 @@ def _reconstruct_full_solution(q_m, t_m, network, delta, final_indices, t0_lin, 
     links_m = final_indices["links_m"]
     paths_m = final_indices["paths_m"]
     
-    links_u = sorted(list(set(range(n)) - set(links_m)))
+    if "links_u" in final_indices:
+        links_u = final_indices["links_u"]
+    else:
+        links_u = sorted(list(set(range(n)) - set(links_m)))
+        
     paths_u = sorted(list(set(range(p)) - set(paths_m)))
+    
     delta_u = delta[np.ix_(links_u, paths_u)]
     
-    # Flux sur les liens uniques
     q_u = delta_u @ q_od_u + delta_u_m @ q_od_m
     q_u = clean_matrix(q_u)
     
-    # Temps sur les liens uniques
     K_uu = K[np.ix_(links_u, links_u)]
     t_u = t0_lin[links_u].reshape(-1, 1) + K_uu @ q_u
     t_u = clean_matrix(t_u)
     
-    # Reconstruction complète
-    lam_flows = np.zeros((n, 1))
-    lam_flows[links_m] = q_m
-    lam_flows[links_u] = q_u
+    lam_flows_full = np.zeros(n)
+    lam_times_full = np.zeros(n)
     
-    lam_times = np.zeros((n, 1))
-    lam_times[links_m] = t_m
-    lam_times[links_u] = t_u
+    for i, link_idx in enumerate(links_m):
+        lam_flows_full[link_idx] = q_m[i]
+        lam_times_full[link_idx] = t_m[i]
+        
+    for i, link_idx in enumerate(links_u):
+        lam_flows_full[link_idx] = q_u.flatten()[i]
+        lam_times_full[link_idx] = t_u.flatten()[i]
     
-    # Nettoyer et retourner
-    lam_flows = clean_matrix(lam_flows)
-    lam_times = clean_matrix(lam_times)
+    print("links_u, paths_u, links_m, paths_m :", links_u, paths_u, links_m, paths_m)
+    
+    lam_flows = clean_matrix(lam_flows_full.reshape(-1, 1))
+    lam_times = clean_matrix(lam_times_full.reshape(-1, 1))
     
     return lam_flows.flatten(), lam_times.flatten()
 
@@ -395,15 +313,7 @@ def _reconstruct_full_solution(q_m, t_m, network, delta, final_indices, t0_lin, 
 
 def lam_solver_linear_system(network, final_indices, dimensions, alpha, beta, eps_num, 
                              A, T_m, B, r_0, q_0, delta, delta_u_m, q_od_u, q_od_m):
-    """
-    Résout le système linéarisé via système linéaire (méthode 1).
-    
-    Système:
-    [ A    0    0    0  ] [ r  ]   [ r_0        ]
-    [ 0    0    0   T_m ] [ q_m] = [ 0          ]
-    [-B   I_n   0    0  ] [ t_m]   [ q_0        ]
-    [ 0    0  -K_m  I_n ] [λ_m ]   [ t_{0,lin}^m]
-    """
+    """Résout le système linéarisé via système linéaire (méthode 1)."""
     t0, C = network.t0, network.C
     t0_lin, K = cf.linearised_bpr_matrices(t0, C, alpha, beta, eps_num)
     links_m = final_indices["links_m"]
@@ -411,39 +321,33 @@ def lam_solver_linear_system(network, final_indices, dimensions, alpha, beta, ep
     K_m = K[np.ix_(links_m, links_m)]
     t0_lin_m = t0_lin[links_m].reshape(-1, 1)
 
-    # Construction du système
     M = np.block([
         [A, np.zeros((s1, 2*n1))],
         [np.zeros((u1, r1+n1)), T_m],
         [-B, np.eye(n1), np.zeros((n1, n1))],
         [np.zeros((n1, r1)), -K_m, np.eye(n1)]
     ])
-    M = clean_matrix(M)
 
     y = np.vstack([r_0, np.zeros((u1, 1)), q_0, t0_lin_m])
-    y = clean_matrix(y)
 
-    # Diagnostic
-    if RobustnessConfig.DIAGNOSTICS:
-        diagnose_matrix(M, "M (linear_system)")
+    x = np.linalg.solve(M, y)
 
-    # Résolution robuste
-    x = robust_solve(M, y, method='auto')
-
-    # Extraction
     r = x[:r1]
     q_m = x[r1:r1+n1]
     t_m = x[r1+n1:]
 
-    print('dimensions r1, u1, s1 : ',r1, u1, s1)
-    print('dimensions m , y , x : ', M.shape, y.shape, x.shape)
+    print('dimensions r1, u1, s1 :', r1, u1, s1)
+    print('dimensions M, y, x :', M.shape, y.shape, x.shape)
 
-    return _reconstruct_full_solution(q_m, t_m, network, delta, final_indices, t0_lin, K, delta_u_m, q_od_u, q_od_m)
+    return _reconstruct_full_solution(
+        q_m, t_m, network, delta, final_indices, 
+        t0_lin, K, delta_u_m, q_od_u, q_od_m
+    )
 
-"""
+
 def lam_solver_qp(network, final_indices, dimensions, alpha, beta, eps_num, 
                  A, B, q0, r0, delta, delta_u_m, q_od_u, q_od_m):
-
+    """Résout via formulation quadratique (méthode 2)."""
     t0, C = network.t0, network.C
     t0_lin, K = cf.linearised_bpr_matrices(t0, C, alpha, beta, eps_num)
     n1, r1, s1, u1 = dimensions["n1"], dimensions["r1"], dimensions["s1"], dimensions["u1"]
@@ -459,136 +363,68 @@ def lam_solver_qp(network, final_indices, dimensions, alpha, beta, eps_num,
     y_bottom = r0
     y = np.vstack([y_top, y_bottom])
 
-    x = robust_solve(M, y)
+    x = np.linalg.solve(M, y)
 
     r = x[:r1]
     q_m = B @ r + q0
     t_m = t0_lin_m + K_m @ q_m
 
-    return _reconstruct_full_solution(q_m, t_m, network, delta, final_indices, t0_lin, K, delta_u_m, q_od_u, q_od_m)
-
-"""
-def lam_solver_qp(network, final_indices, dimensions, alpha, beta, eps_num, 
-                 A, B, q0, r0, delta, delta_u_m, q_od_u, q_od_m):
-    """
-    Résout le système linéarisé via problème quadratique (version robuste).
-    
-    Système équivalent à résoudre:
-    min_{r} (1/2) r^T (B^T K_m B) r + (B^T K_m q_0 + B^T t_{0,lin}^m)^T r
-    s.c.   A r = r_0
-    
-    Conditions KKT:
-    [ B^T K_m B    A^T ] [ r  ]   [ -B^T K_m q_0 - B^T t_{0,lin}^m ]
-    [    A          0  ] [ λ  ] = [          r_0                    ]
-    """
-    # Extraction des données
-    t0, C = network.t0, network.C
-    t0_lin, K = cf.linearised_bpr_matrices(t0, C, alpha, beta, eps_num)
-    n1, r1, s1, u1 = dimensions["n1"], dimensions["r1"], dimensions["s1"], dimensions["u1"]
-    links_m = final_indices["links_m"]
-    
-    # Préparation des matrices locales
-    t0_lin_m = t0_lin[links_m].reshape(-1, 1)
-    K_m = K[np.ix_(links_m, links_m)]
-    
-    # Nettoyage préalable
-    K_m = clean_matrix(K_m)
-    B = clean_matrix(B)
-    A = clean_matrix(A)
-    q0 = clean_matrix(q0)
-    r0 = clean_matrix(r0)
-    t0_lin_m = clean_matrix(t0_lin_m)
-    
-    # Construction de la matrice hessienne H = B^T K_m B
-    # Avec régularisation si nécessaire
-    H = B.T @ K_m @ B
-    H = clean_matrix(H)
-    
-    # Vérifier le conditionnement de H
-    if RobustnessConfig.DIAGNOSTICS:
-        cond_H = np.linalg.cond(H)
-        if cond_H > RobustnessConfig.MAX_CONDITION:
-            warnings.warn(f"Matrice H mal conditionnée (cond={cond_H:.2e}), ajout de régularisation.")
-            # Régularisation de Tikhonov adaptative
-            lambda_reg = RobustnessConfig.THRESHOLD_CLEAN * np.trace(H) / H.shape[0]
-            H += lambda_reg * np.eye(H.shape[0])
-            H = clean_matrix(H)
-    
-    # Construction de la matrice KKT
-    if s1 > 0:  # Si contraintes structurelles présentes
-        M_top = np.hstack([H, A.T])
-        M_bottom = np.hstack([A, np.zeros((s1, s1))])
-        M = np.vstack([M_top, M_bottom])
-        
-        # Vecteur second membre
-        y_top = -B.T @ K_m @ q0 - B.T @ t0_lin_m
-        y_bottom = r0
-        y = np.vstack([y_top, y_bottom])
-    else:  # Cas s1 = 0: pas de contraintes structurelles
-        M = H
-        y = -B.T @ K_m @ q0 - B.T @ t0_lin_m
-    
-    # Nettoyage final
-    M = clean_matrix(M)
-    y = clean_matrix(y)
-    
-    # Diagnostic détaillé
-    if RobustnessConfig.DIAGNOSTICS:
-        diagnose_matrix(M, "M (QP)")
-        diagnose_matrix(H, "H (Hessian)")
-        if s1 > 0:
-            diagnose_matrix(A, "A (constraints)")
-    
-    # Résolution robuste avec détection automatique de méthode
-    x = robust_solve(M, y, method='auto')
-    
-    # Extraction de la solution
-    if s1 > 0:
-        r = x[:r1]
-        # λ = x[r1:r1+s1]  # Multiplicateurs de Lagrange (optionnel)
-    else:
-        r = x
-    
-    # Reconstruction des flux et temps
-    q_m = B @ r + q0
-    q_m = clean_matrix(q_m)
-    
-    t_m = t0_lin_m + K_m @ q_m
-    t_m = clean_matrix(t_m)
-    
-    # Vérification de la satisfaction des contraintes (si présentes)
-    if RobustnessConfig.VERBOSE and s1 > 0:
-        constraint_residual = np.linalg.norm(A @ r - r0)
-        print(f"Résidu des contraintes: {constraint_residual:.2e}")
-        if constraint_residual > RobustnessConfig.THRESHOLD_CLEAN * 10:
-            warnings.warn(f"Contraintes mal satisfaites: résidu = {constraint_residual:.2e}")
-    
-    if RobustnessConfig.VERBOSE:
-        print(f'Dimensions QP: r1={r1}, s1={s1}, n1={n1}')
-        print(f'Shape M: {M.shape}, y: {y.shape}, x: {x.shape}')
-    
-    # Reconstruction de la solution complète
     return _reconstruct_full_solution(
         q_m, t_m, network, delta, final_indices, 
         t0_lin, K, delta_u_m, q_od_u, q_od_m
     )
 
+
+def lam_solver_qp_analytical(network, final_indices, dimensions, alpha, beta, eps_num, 
+                             A, B, Rr, q0, r0, delta, delta_u_m, q_od_u, q_od_m):
+    """Résout via formulation analytique optimisée (méthode 3)."""
+    t0, C = network.t0, network.C
+    t0_lin, K = cf.linearised_bpr_matrices(t0, C, alpha, beta, eps_num)
+    n1, r1, s1, u1 = dimensions["n1"], dimensions["r1"], dimensions["s1"], dimensions["u1"]
+    links_m = final_indices["links_m"]
+    t0_lin_m = t0_lin[links_m].reshape(-1, 1)
+    K_m = K[np.ix_(links_m, links_m)]
+
+    M_top = np.hstack([B.T @ K_m @ B, A.T])
+    M_bottom = np.hstack([A, np.zeros((s1, s1))])
+    M = np.vstack([M_top, M_bottom])
+    M = clean_matrix(M)
+
+    M_inv = robust_solve(M, np.eye(M.shape[0]), method="auto")
+    M_inv = clean_matrix(M_inv)
+
+    bkb = np.linalg.inv(B.T @ K_m @ B)
+    abkba = np.linalg.inv(A @ bkb @ A.T)
+    Mrr = bkb - bkb @ A.T @ abkba @ A @ bkb
+    Mrl = bkb @ A.T @ abkba    
+
+    Rt = -B @ Mrr @ B.T
+    Rq = B @ Mrl @ Rr
+    q_m = Rt @ (t0_lin_m + K_m @ q0) + Rq @ q_od_m + q0
+    t_m = t0_lin_m + K_m @ q_m
+
+    return _reconstruct_full_solution(
+        q_m, t_m, network, delta, final_indices, 
+        t0_lin, K, delta_u_m, q_od_u, q_od_m
+    )
+
+
 # ========== FONCTION PRINCIPALE ==========
 
-def compute_lam_solution(network, path_list, G, eps_num, method='qp', alpha=0.15, beta=4):
+def compute_lam_solution(network, path_list, G, eps_num, method, alpha, beta):
     """
-    Calcule la solution analytique LAM.
+    Calcule la solution LAM complète.
     
     Args:
         network: Objet Network
-        path_list: Liste des chemins trouvÃ©s par MSA
+        path_list: Liste des chemins trouvés par MSA
         G: Graphe NetworkX
-        eps_num: Niveau de congestion moyen (flow/capacity)
-        method: 'qp' ou 'linear_system'
-        alpha, beta: ParamÃ¨tres BPR
+        eps_num: Niveau de congestion de référence
+        method: Méthode de résolution ('qp', 'linear_system', 'qp_analytical')
+        alpha, beta: Paramètres BPR
     
     Returns:
-        lam_flows, lam_times: Flux et temps de parcours analytiques
+        lam_flows, lam_times: Solutions LAM
     """
     # 1. Construction des matrices de base
     gamma = build_gamma_matrix(path_list, network)
@@ -612,15 +448,8 @@ def compute_lam_solution(network, path_list, G, eps_num, method='qp', alpha=0.15
     B, q0, q_od_u = build_B_q0(delta_m, delta_m_tilde, delta_m_u, network, final_indices)
     T_m = build_T_m(T, final_indices)
     dimensions = extract_dimensions(delta_m, delta_m_tilde, A, T_m)
-
-    """     if A.shape[0] == 0:  # s1 = 0 case
-        print("Note: s1 = 0 detected, using direct path formulation")
-        return lam_solver_direct_path(
-            network, final_indices, dimensions, alpha, beta, eps_num,
-            gamma_m, delta_m, T_m, q0, q_od_m, delta, delta_u_m, q_od_u
-        ) """
     
-    # 5. Résolution selon la mÃ©thode choisie
+    # 5. Résolution selon la méthode choisie
     if method == 'qp':
         lam_flows, lam_times = lam_solver_qp(
             network, final_indices, dimensions, alpha, beta, eps_num,
@@ -631,27 +460,81 @@ def compute_lam_solution(network, path_list, G, eps_num, method='qp', alpha=0.15
             network, final_indices, dimensions, alpha, beta, eps_num,
             A, T_m, B, r0, q0, delta, delta_u_m, q_od_u, q_od_m
         )
+    elif method == 'qp_analytical':
+        lam_flows, lam_times = lam_solver_qp_analytical(
+            network, final_indices, dimensions, alpha, beta, eps_num, 
+            A, B, Rr, q0, r0, delta, delta_u_m, q_od_u, q_od_m
+        )
     else:
-        raise ValueError(f"Méthode inconnue: {method}. Utilisez 'qp' ou 'linear_system'.")
+        raise ValueError(
+            f"Méthode inconnue: {method}. "
+            "Utilisez 'qp', 'linear_system' ou 'qp_analytical'."
+        )
+    
+    _analyze_and_print_path_costs(lam_times, path_list, network, G)
     
     return lam_flows, lam_times
 
 
+# ========== ANALYSEUR DE CHEMINS ==========
 
-def analyze_conditioning(M, tol=1e-12):
-    """Analyse le conditionnement de la matrice M et retourne le mode de rÃ©solution appropriÃ©."""
-    U, s, Vt = np.linalg.svd(M)
-    sigma_min = np.min(s)
-    sigma_max = np.max(s)
-    cond = sigma_max / max(sigma_min, tol)
+def _analyze_and_print_path_costs(lam_times, path_list, network, G):
+    """Analyse et affiche les coûts des chemins."""
+    print("\n" + "="*80)
+    print("ANALYSE DES COÛTS DE CHEMINS (BASÉE SUR LES TEMPS LAM FINAUX)")
+    print("="*80)
     
-    if cond < 1e3:
-        method = 'inv'       # inversion directe
-    elif cond < 1e6:
-        method = 'pinv'      # pseudo-inverse stable
-    elif cond < 1e10:
-        method = 'lstsq'     # rÃ©solution moindres carrÃ©s
-    else:
-        method = 'tikhonov'  # rÃ©gularisation
+    m = len(network.on)
     
-    return cond, method
+    for k in range(m):
+        origin = network.on[k]
+        dest = network.dn[k]
+        demand = network.q_od[k]
+        paths_for_od = path_list[k]
+        
+        print(f"\n--- Paire OD {k+1}: {origin} -> {dest} (Demande = {demand:.2f}) ---")
+        
+        if not paths_for_od:
+            print("    Aucun chemin trouvé pour cette OD.")
+            continue
+            
+        path_costs = []
+        for path in paths_for_od:
+            cost = 0.0
+            for i in range(len(path) - 1):
+                u, v = path[i], path[i+1]
+                try:
+                    link_idx = G[u][v]['index']
+                    cost += lam_times[link_idx]
+                except KeyError:
+                    print(f"    ERREUR: Arc {u}->{v} non trouvé dans le graphe G.")
+            path_costs.append((cost, path))
+            
+        if not path_costs:
+            print("    Aucun coût n'a pu être calculé.")
+            continue
+
+        min_cost = min(c for c, p in path_costs)
+        
+        print(f"    Coût minimum (Équilibre): {min_cost:.6f}")
+        
+        print("    Chemins Actifs (se partagent la demande) :")
+        count_active = 0
+        for cost, path in path_costs:
+            if np.isclose(cost, min_cost, atol=1e-6):
+                path_str = " -> ".join(map(str, path))
+                print(f"      - [Coût: {cost:.6f}] {path_str}")
+                count_active += 1
+        
+        if count_active == 0:
+             print("      (Aucun chemin actif trouvé - étrange)")
+             
+        inactive_paths = [(c, p) for c, p in path_costs 
+                          if not np.isclose(c, min_cost, atol=1e-6)]
+        if inactive_paths:
+            print("\n    Chemins Inactifs (plus chers) :")
+            for cost, path in inactive_paths:
+                path_str = " -> ".join(map(str, path))
+                print(f"      - [Coût: {cost:.6f}] {path_str}")
+                
+    print("="*80 + "\n")

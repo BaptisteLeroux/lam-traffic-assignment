@@ -3,6 +3,11 @@ import modules.cost_functions as cf
 
 def MSA_solver(network, N_iter, tol, alpha, beta, linearize_bpr, eps=None):
 
+    if network.name == "toy" :
+        N_cache_paths = 0
+    else :
+        N_cache_paths = N_iter-100 if beta == 1 else N_iter-2 # Itérations avant de commencer à stocker les chemins (si beta grand, selectionner dernieres itérations)
+
     if linearize_bpr and eps is None:
         raise ValueError("Le paramètre eps doit être fourni pour la linéarisation de BPR.")
 
@@ -20,6 +25,7 @@ def MSA_solver(network, N_iter, tol, alpha, beta, linearize_bpr, eps=None):
 
     # Chemins à chaque itération
     L = [None for _ in range(m)]       # Chemin courant pour chaque OD
+    # path_list est conservée mais le stockage est conditionnel
     path_list = [[] for _ in range(m)]         # Tous les chemins uniques rencontrés
 
     # Construction initiale du graphe
@@ -52,8 +58,13 @@ def MSA_solver(network, N_iter, tol, alpha, beta, linearize_bpr, eps=None):
 
             # Stockage du chemin courant
             L[k] = path
-            if path not in path_list[k]:
-                path_list[k].append(path)
+            
+            # --- AJOUT DE LA CONDITION ICI ---
+            # Stockage du chemin uniquement si l'itération est >= 300
+            if it >= N_cache_paths: 
+                if path not in path_list[k]:
+                    path_list[k].append(path)
+            # --- FIN DE L'AJOUT ---
 
             # Affecter le flux sur le chemin
             for i in range(len(path) - 1):
@@ -62,10 +73,11 @@ def MSA_solver(network, N_iter, tol, alpha, beta, linearize_bpr, eps=None):
         return aux_flow
 
     # Résolution MSA
-    for it in range(N_iter):
+    for it in range(N_iter): # 'it' est le compteur d'itération
         # Calculer le pas pour cette itération
         phi = 1 / (it + 1)  
         
+        # NOTE : 'it' est maintenant accessible dans all_or_nothing_assignment
         times = compute_travel_times(V)
         F = all_or_nothing_assignment(times)
         
@@ -80,5 +92,23 @@ def MSA_solver(network, N_iter, tol, alpha, beta, linearize_bpr, eps=None):
     if it == N_iter - 1:
         print(f"Convergence non atteinte après {N_iter} itérations, écart = {gap:.6f}")
 
-    return path_list, V, compute_travel_times(V), G
+    path_list = [[[int(node) for node in path] for path in od_pair] for od_pair in path_list]
 
+    """
+    print("\n--- Chemins trouvés par paire OD ---")
+    for k in range(m): # m = len(on)
+        origin = on[k]
+        destination = dn[k]
+        paths_for_od = path_list[k]
+        
+        print(f"\n  Paire OD ({origin} -> {destination}):")
+        if not paths_for_od:
+            print("    Aucun chemin trouvé.")
+        else:
+            for i, path in enumerate(paths_for_od):
+                # Afficher le chemin sous forme de chaîne (ex: "1 -> 2 -> 3")
+                path_str = " -> ".join(map(str, path))
+                print(f"    Chemin {i+1}: {path_str}")
+    # ---- FIN DE LA MODIFICATION ----
+    """
+    return path_list, V, compute_travel_times(V), G

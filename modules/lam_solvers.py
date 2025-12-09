@@ -15,7 +15,7 @@ from modules.robust_functions import (
 # ========== MATRICES DE BASE ==========
 
 def build_gamma_matrix(path_list, network):
-    """Construit la matrice γ (m x p) reliant OD aux chemins."""
+    """Construit la matrice Γ (m x p) reliant OD aux chemins."""
     m = len(network.on)
     p = sum(len(k) for k in path_list)
 
@@ -263,10 +263,134 @@ def extract_dimensions(delta_m, delta_m_tilde, A, T_m):
     return {"n1": n1, "r1": r1, "s1": s1, "u1": u1}
 
 
+# ========== NOUVELLES FONCTIONS POUR LES MATRICES U ET S ==========
+
+def build_U_matrices(R_t, R_q, delta_m_u, delta_u, delta_u_m, gamma_m, K_m):
+    """
+    Construit les matrices U_t et U_q selon les équations (51) de l'article.
+    
+    NOTE: Cette fonction est conservée pour référence mais n'est pas utilisée
+    dans l'implémentation actuelle. Nous utilisons une méthode simplifiée
+    basée directement sur les relations duales (voir compute_od_times).
+    
+    Args:
+        R_t: Matrice de réponse temporelle (n_m x n_m)
+        R_q: Matrice de réponse aux demandes (n_m x m_m)
+        delta_m_u: Matrice d'incidence liens multiples vers chemins uniques (n_m x p_u)
+        delta_u: Matrice d'incidence liens uniques vers chemins uniques (n_u x p_u)
+        delta_u_m: Matrice d'incidence liens uniques vers OD multiples (n_u x m_m)
+        gamma_m: Matrice gamma réduite (m_m x p_m)
+        K_m: Matrice de performance des liens multiples (n_m x n_m)
+    
+    Returns:
+        U_t, U_q: Matrices de transformation
+    """
+    n_m = R_t.shape[0]
+    n_u = delta_u.shape[0]
+    n_total = n_m + n_u
+    
+    # Construction de U_t selon eq. (51)
+    U_t = np.zeros((n_total, n_total))
+    U_t[:n_m, :n_m] = R_t
+    
+    # Construction de U_q selon eq. (51)
+    m_m = gamma_m.shape[0]
+    
+    # Nombre d'OD uniques = nombre de colonnes de delta_u (car chaque colonne = un chemin unique = 1 OD unique)
+    m_u = delta_u.shape[1]
+    m_total = m_m + m_u
+    
+    U_q = np.zeros((n_total, m_total))
+    
+    # Partie supérieure gauche: R_q (n_m x m_m)
+    U_q[:n_m, :m_m] = R_q
+    
+    # Partie supérieure droite: (I + R_t * K_m) * delta_m_u (n_m x m_u)
+    I_plus_RtKm = np.eye(n_m) + R_t @ K_m
+    U_q[:n_m, m_m:] = I_plus_RtKm @ delta_m_u
+    
+    # Partie inférieure gauche: delta_u_m (n_u x m_m)
+    U_q[n_m:, :m_m] = delta_u_m
+    
+    # Partie inférieure droite: delta_u (n_u x m_u) 
+    U_q[n_m:, m_m:] = delta_u
+    
+    return U_t, U_q
+
+
+def build_S_matrices(gamma, delta, U_q):
+    """
+    Construit les matrices S_t et S_q selon les équations (58) de l'article.
+    
+    t_OD = S_t * t_0 + S_q * q_OD
+    
+    Args:
+        gamma: Matrice OD-chemins complète (m x p)
+        delta: Matrice liens-chemins complète (n x p)
+        U_q: Matrice de transformation des flux (n x m)
+    
+    Returns:
+        S_t, S_q: Matrices de transformation pour les temps OD
+    """
+    # Calcul de la pseudo-inverse de gamma
+    gamma_pinv = robust_pinv(gamma)
+    
+    # Selon eq. (57) et (58):
+    # t_OD = (Γ†)^T * Δ^T * t
+    #      = (Γ†)^T * Δ^T * (t_0 + K*q)
+    #      = (Γ†)^T * Δ^T * t_0 + (Γ†)^T * Δ^T * K * (U_q * q_OD)
+    
+    # S_t = (Γ†)^T * Δ^T (partie indépendante de q)
+    S_t = gamma_pinv.T @ delta.T
+    
+    # S_q = (Γ†)^T * Δ^T * K * U_q
+    # Mais K dépend du point de linéarisation, on le calculera dans compute_od_times
+    # Ici on retourne juste la partie géométrique
+    # S_q sera calculé comme: (Γ†) @ Δ^T @ K @ U_q dans compute_od_times
+    
+    S_t = clean_matrix(S_t)
+    
+    return S_t
+
+
+def compute_od_times(lam_flows, lam_times, t0, gamma, delta, network):
+    """
+    Calcule les temps OD selon la formulation de l'article.
+    
+    Méthode simplifiée: on calcule directement les temps de chemins puis on agrège.
+    
+    Args:
+        lam_flows: Vecteur des flux sur les liens (n,)
+        lam_times: Vecteur des temps sur les liens (n,)
+        t0: Temps de parcours à vide (n,)
+        gamma: Matrice OD-chemins (m x p)
+        delta: Matrice liens-chemins (n x p)
+        network: Objet réseau
+    
+    Returns:
+        t_OD: Vecteur des temps OD moyens (m,)
+    """
+    # Calcul des temps sur les chemins par relation duale
+    # t_p = Δ^T * t
+    t_paths = delta.T @ lam_times.reshape(-1, 1)  # (p x 1)
+    
+    # Calcul de la pseudo-inverse de gamma
+    gamma_pinv = robust_pinv(gamma)
+    
+    # Temps OD par relation duale
+    # t_OD = (Γ†)^T * t_p
+    t_OD = (gamma_pinv.T @ t_paths).flatten()
+    
+    t_OD = clean_matrix(t_OD)
+    
+    return t_OD
+
+
 # ========== RECONSTRUCTION ==========
 
 def _reconstruct_full_solution(q_m, t_m, network, delta, final_indices, 
-                               t0_lin, K, delta_u_m, q_od_u, q_od_m):
+                               t0_lin, K, delta_u_m, q_od_u, q_od_m,
+                               gamma, R_t, R_q, delta_m_u, gamma_m):
     """Reconstruit la solution complète à partir des variables réduites."""
     n = len(network.sn)
     p = delta.shape[1]
@@ -306,13 +430,22 @@ def _reconstruct_full_solution(q_m, t_m, network, delta, final_indices,
     lam_flows = clean_matrix(lam_flows_full.reshape(-1, 1))
     lam_times = clean_matrix(lam_times_full.reshape(-1, 1))
     
-    return lam_flows.flatten(), lam_times.flatten()
+    # NOUVEAU: Calcul des temps OD
+    # Utilisation de la méthode simplifiée basée sur les relations duales
+    t_OD = compute_od_times(lam_flows, lam_times, t0_lin, gamma, delta, network)
+    
+    print("\n=== TEMPS OD CALCULÉS ===")
+    for i, (origin, dest) in enumerate(zip(network.on, network.dn)):
+        print(f"OD {i+1}: {origin} -> {dest}: t_OD = {t_OD[i]:.4f}")
+    
+    return lam_flows.flatten(), lam_times.flatten(), t_OD
 
 
 # ========== SOLVEURS ==========
 
 def lam_solver_linear_system(network, final_indices, dimensions, alpha, beta, eps_num, 
-                             A, T_m, B, r_0, q_0, delta, delta_u_m, q_od_u, q_od_m):
+                             A, T_m, B, r_0, q_0, delta, delta_u_m, q_od_u, q_od_m,
+                             gamma, R_t, R_q, delta_m_u, gamma_m):
     """Résout le système linéarisé via système linéaire (méthode 1)."""
     t0, C = network.t0, network.C
     t0_lin, K = cf.linearised_bpr_matrices(t0, C, alpha, beta, eps_num)
@@ -341,12 +474,14 @@ def lam_solver_linear_system(network, final_indices, dimensions, alpha, beta, ep
 
     return _reconstruct_full_solution(
         q_m, t_m, network, delta, final_indices, 
-        t0_lin, K, delta_u_m, q_od_u, q_od_m
+        t0_lin, K, delta_u_m, q_od_u, q_od_m,
+        gamma, R_t, R_q, delta_m_u, gamma_m
     )
 
 
 def lam_solver_qp(network, final_indices, dimensions, alpha, beta, eps_num, 
-                 A, B, q0, r0, delta, delta_u_m, q_od_u, q_od_m):
+                 A, B, q0, r0, delta, delta_u_m, q_od_u, q_od_m,
+                 gamma, R_t, R_q, delta_m_u, gamma_m):
     """Résout via formulation quadratique (méthode 2)."""
     t0, C = network.t0, network.C
     t0_lin, K = cf.linearised_bpr_matrices(t0, C, alpha, beta, eps_num)
@@ -371,12 +506,14 @@ def lam_solver_qp(network, final_indices, dimensions, alpha, beta, eps_num,
 
     return _reconstruct_full_solution(
         q_m, t_m, network, delta, final_indices, 
-        t0_lin, K, delta_u_m, q_od_u, q_od_m
+        t0_lin, K, delta_u_m, q_od_u, q_od_m,
+        gamma, R_t, R_q, delta_m_u, gamma_m
     )
 
 
 def lam_solver_qp_analytical(network, final_indices, dimensions, alpha, beta, eps_num, 
-                             A, B, Rr, q0, r0, delta, delta_u_m, q_od_u, q_od_m):
+                             A, B, Rr, q0, r0, delta, delta_u_m, q_od_u, q_od_m,
+                             gamma, delta_m_u, gamma_m):
     """Résout via formulation analytique optimisée (méthode 3)."""
     t0, C = network.t0, network.C
     t0_lin, K = cf.linearised_bpr_matrices(t0, C, alpha, beta, eps_num)
@@ -405,7 +542,8 @@ def lam_solver_qp_analytical(network, final_indices, dimensions, alpha, beta, ep
 
     return _reconstruct_full_solution(
         q_m, t_m, network, delta, final_indices, 
-        t0_lin, K, delta_u_m, q_od_u, q_od_m
+        t0_lin, K, delta_u_m, q_od_u, q_od_m,
+        gamma, Rt, Rq, delta_m_u, gamma_m
     )
 
 
@@ -413,7 +551,7 @@ def lam_solver_qp_analytical(network, final_indices, dimensions, alpha, beta, ep
 
 def compute_lam_solution(network, path_list, G, eps_num, method, alpha, beta):
     """
-    Calcule la solution LAM complète.
+    Calcule la solution LAM complète incluant les temps OD.
     
     Args:
         network: Objet Network
@@ -424,7 +562,7 @@ def compute_lam_solution(network, path_list, G, eps_num, method, alpha, beta):
         alpha, beta: Paramètres BPR
     
     Returns:
-        lam_flows, lam_times: Solutions LAM
+        lam_flows, lam_times, t_OD: Solutions LAM avec temps OD
     """
     # 1. Construction des matrices de base
     gamma = build_gamma_matrix(path_list, network)
@@ -451,19 +589,48 @@ def compute_lam_solution(network, path_list, G, eps_num, method, alpha, beta):
     
     # 5. Résolution selon la méthode choisie
     if method == 'qp':
-        lam_flows, lam_times = lam_solver_qp(
+        # Calcul de R_t et R_q pour la méthode QP
+        t0, C = network.t0, network.C
+        t0_lin, K = cf.linearised_bpr_matrices(t0, C, alpha, beta, eps_num)
+        links_m = final_indices["links_m"]
+        K_m = K[np.ix_(links_m, links_m)]
+        
+        bkb = np.linalg.inv(B.T @ K_m @ B)
+        abkba = np.linalg.inv(A @ bkb @ A.T)
+        Mrr = bkb - bkb @ A.T @ abkba @ A @ bkb
+        Mrl = bkb @ A.T @ abkba
+        R_t = -B @ Mrr @ B.T
+        R_q = B @ Mrl @ Rr
+        
+        lam_flows, lam_times, t_OD = lam_solver_qp(
             network, final_indices, dimensions, alpha, beta, eps_num,
-            A, B, q0, r0, delta, delta_u_m, q_od_u, q_od_m
+            A, B, q0, r0, delta, delta_u_m, q_od_u, q_od_m,
+            gamma, R_t, R_q, delta_m_u, gamma_m
         )
     elif method == 'linear_system':
-        lam_flows, lam_times = lam_solver_linear_system(
+        # Pour linear_system, on calcule aussi R_t et R_q
+        t0, C = network.t0, network.C
+        t0_lin, K = cf.linearised_bpr_matrices(t0, C, alpha, beta, eps_num)
+        links_m = final_indices["links_m"]
+        K_m = K[np.ix_(links_m, links_m)]
+        
+        bkb = np.linalg.inv(B.T @ K_m @ B)
+        abkba = np.linalg.inv(A @ bkb @ A.T)
+        Mrr = bkb - bkb @ A.T @ abkba @ A @ bkb
+        Mrl = bkb @ A.T @ abkba
+        R_t = -B @ Mrr @ B.T
+        R_q = B @ Mrl @ Rr
+        
+        lam_flows, lam_times, t_OD = lam_solver_linear_system(
             network, final_indices, dimensions, alpha, beta, eps_num,
-            A, T_m, B, r0, q0, delta, delta_u_m, q_od_u, q_od_m
+            A, T_m, B, r0, q0, delta, delta_u_m, q_od_u, q_od_m,
+            gamma, R_t, R_q, delta_m_u, gamma_m
         )
     elif method == 'qp_analytical':
-        lam_flows, lam_times = lam_solver_qp_analytical(
+        lam_flows, lam_times, t_OD = lam_solver_qp_analytical(
             network, final_indices, dimensions, alpha, beta, eps_num, 
-            A, B, Rr, q0, r0, delta, delta_u_m, q_od_u, q_od_m
+            A, B, Rr, q0, r0, delta, delta_u_m, q_od_u, q_od_m,
+            gamma, delta_m_u, gamma_m
         )
     else:
         raise ValueError(
@@ -473,7 +640,7 @@ def compute_lam_solution(network, path_list, G, eps_num, method, alpha, beta):
     
     _analyze_and_print_path_costs(lam_times, path_list, network, G)
     
-    return lam_flows, lam_times
+    return lam_flows, lam_times, t_OD
 
 
 # ========== ANALYSEUR DE CHEMINS ==========
@@ -524,17 +691,66 @@ def _analyze_and_print_path_costs(lam_times, path_list, network, G):
             if np.isclose(cost, min_cost, atol=1e-6):
                 path_str = " -> ".join(map(str, path))
                 print(f"      - [Coût: {cost:.6f}] {path_str}")
-                count_active += 1
-        
-        if count_active == 0:
-             print("      (Aucun chemin actif trouvé - étrange)")
-             
-        inactive_paths = [(c, p) for c, p in path_costs 
-                          if not np.isclose(c, min_cost, atol=1e-6)]
-        if inactive_paths:
-            print("\n    Chemins Inactifs (plus chers) :")
-            for cost, path in inactive_paths:
-                path_str = " -> ".join(map(str, path))
-                print(f"      - [Coût: {cost:.6f}] {path_str}")
                 
     print("="*80 + "\n")
+
+
+# ========== FONCTION UTILITAIRE POUR AFFICHER LES TEMPS OD ==========
+
+def print_od_times_comparison(t_OD_lam, path_list, network, G, msa_times):
+    """
+    Compare les temps OD calculés par LAM avec ceux déduits de MSA.
+    
+    Args:
+        t_OD_lam: Temps OD calculés par LAM
+        path_list: Liste des chemins
+        network: Objet réseau
+        G: Graphe
+        msa_times: Temps MSA sur les liens
+    """
+    print("\n" + "="*80)
+    print("COMPARAISON DES TEMPS ORIGINE-DESTINATION")
+    print("="*80)
+    
+    m = len(network.on)
+    
+    # Calcul des temps OD depuis MSA (chemin le plus court)
+    t_OD_msa = np.zeros(m)
+    for k in range(m):
+        if path_list[k]:
+            # Prendre le premier chemin (supposé le plus court à l'équilibre)
+            path = path_list[k][0]
+            time = 0.0
+            for i in range(len(path) - 1):
+                u, v = path[i], path[i+1]
+                link_idx = G[u][v]['index']
+                time += msa_times[link_idx]
+            t_OD_msa[k] = time
+    
+    print(f"\n{'OD':<6} {'Origine':<8} {'Dest':<8} {'Demande':<10} {'t_LAM':<12} {'t_MSA':<12} {'Écart %':<10}")
+    print("-" * 80)
+    
+    for k in range(m):
+        origin = network.on[k]
+        dest = network.dn[k]
+        demand = network.q_od[k]
+        t_lam = t_OD_lam[k]
+        t_msa = t_OD_msa[k]
+        
+        if t_msa > 0:
+            ecart_pct = abs(t_lam - t_msa) / t_msa * 100
+        else:
+            ecart_pct = 0.0
+        
+        print(f"{k+1:<6} {origin:<8} {dest:<8} {demand:<10.2f} {t_lam:<12.4f} {t_msa:<12.4f} {ecart_pct:<10.2f}")
+    
+    # Statistiques globales
+    valid_mask = t_OD_msa > 0
+    if np.any(valid_mask):
+        mean_error = np.mean(np.abs(t_OD_lam[valid_mask] - t_OD_msa[valid_mask]))
+        mean_error_pct = np.mean(np.abs(t_OD_lam[valid_mask] - t_OD_msa[valid_mask]) / t_OD_msa[valid_mask] * 100)
+        
+        print("\n" + "-" * 80)
+        print(f"Erreur absolue moyenne: {mean_error:.4f}")
+        print(f"Erreur relative moyenne: {mean_error_pct:.2f}%")
+        print("="*80 + "\n")

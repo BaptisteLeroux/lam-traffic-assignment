@@ -115,56 +115,38 @@ def load_network(name):
         net = Network(sn, en, t0, C, on, dn, q_od, node_coords=node_coords)
         return net
     
-    elif name == "sioux_falls_reduced_1_12":
+    elif name == "barcelona":
         BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        data_dir = os.path.join(BASE_DIR, "data", "sioux_falls_reduced\sioux_falls_reduced_1_to_12")
+        data_dir = os.path.join(BASE_DIR, "data", "barcelona")
         
-        df_net = pd.read_csv(os.path.join(data_dir, "reduced_SiouxFalls_net.csv"), sep=',')
-        df_od = pd.read_csv(os.path.join(data_dir, "reduced_SiouxFalls_od.csv"), sep=',')
-        df_node = pd.read_csv(os.path.join(data_dir, "reduced_SiouxFalls_node.csv"), sep=',')
-
-        # Charger les liens depuis le .tntp
-        tntp_file_path = os.path.join(data_dir, "reduced_SiouxFalls_net.tntp")
-        df_links = load_tntp_links(tntp_file_path)
-
+        # Charger les liens depuis le fichier .tntp
+        tntp_net_path = os.path.join(data_dir, "Barcelona_net.tntp")
+        df_links = load_tntp_links_barcelona(tntp_net_path)
+        
         sn = df_links['init_node'].to_numpy(dtype=int)
         en = df_links['term_node'].to_numpy(dtype=int)
         t0 = df_links['free_flow_time'].to_numpy()
         C = df_links['capacity'].to_numpy()
-
-        on = df_od['O'].to_numpy(dtype=int)
-        dn = df_od['D'].to_numpy(dtype=int)
-        q_od = df_od['Ton'].to_numpy()
-
-        node_coords = dict(zip(df_node['Node'], zip(df_node['X'], df_node['Y'])))
-
-        net = Network(sn, en, t0, C, on, dn, q_od, node_coords=node_coords)
-        return net
-    elif name == "sioux_falls_reduced_1_14":
-        BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        data_dir = os.path.join(BASE_DIR, "data", "sioux_falls_reduced\sioux_falls_reduced_1_to_14")
         
-        df_net = pd.read_csv(os.path.join(data_dir, "reduced_SiouxFalls_net.csv"), sep=',')
-        df_od = pd.read_csv(os.path.join(data_dir, "reduced_SiouxFalls_od.csv"), sep=',')
-        df_node = pd.read_csv(os.path.join(data_dir, "reduced_SiouxFalls_node.csv"), sep=',')
-
-        # Charger les liens depuis le .tntp
-        tntp_file_path = os.path.join(data_dir, "reduced_SiouxFalls_net.tntp")
-        df_links = load_tntp_links(tntp_file_path)
-
-        sn = df_links['init_node'].to_numpy(dtype=int)
-        en = df_links['term_node'].to_numpy(dtype=int)
-        t0 = df_links['free_flow_time'].to_numpy()
-        C = df_links['capacity'].to_numpy()
-
+        # Charger les données OD depuis le fichier .tntp
+        tntp_trips_path = os.path.join(data_dir, "Barcelona_trips.tntp")
+        df_od = load_tntp_trips_barcelona(tntp_trips_path)
+        
         on = df_od['O'].to_numpy(dtype=int)
         dn = df_od['D'].to_numpy(dtype=int)
-        q_od = df_od['Ton'].to_numpy()
-
-        node_coords = dict(zip(df_node['Node'], zip(df_node['X'], df_node['Y'])))
-
-        net = Network(sn, en, t0, C, on, dn, q_od, node_coords=node_coords)
+        q_od = df_od['demand'].to_numpy()
+        
+        # Charger les coordonnées des nœuds si disponibles
+        node_file = os.path.join(data_dir, "Barcelona_node.csv")
+        if os.path.exists(node_file):
+            df_node = pd.read_csv(node_file)
+            node_coords = dict(zip(df_node['Node'], zip(df_node['X'], df_node['Y'])))
+        else:
+            node_coords = None
+        
+        net = Network(sn, en, t0, C, on, dn, q_od, node_coords=node_coords, name="barcelona")
         return net
+
 
 def load_tntp_links(filepath):
     with open(filepath, "r") as f:
@@ -234,3 +216,120 @@ def load_tntp_flows(filepath):
     df = pd.DataFrame(records, columns=["init_node", "term_node", "volume", "cost"])
     return df
 
+def load_tntp_links_barcelona(filepath):
+    """
+    Charge le fichier Barcelona_net.tntp et retourne un DataFrame
+    avec les colonnes: init_node, term_node, capacity, length, free_flow_time, etc.
+    """
+    with open(filepath, "r") as f:
+        lines = f.readlines()
+    
+    # Trouver le début des données (après <END OF METADATA>)
+    data_start_index = None
+    for i, line in enumerate(lines):
+        if "<END OF METADATA>" in line:
+            # Les données commencent après la ligne d'en-tête qui suit
+            for j in range(i+1, len(lines)):
+                if lines[j].strip().startswith("~") and "init_node" in lines[j]:
+                    data_start_index = j + 1
+                    break
+            break
+    
+    if data_start_index is None:
+        raise ValueError("Impossible de trouver le début des données dans le fichier")
+    
+    data_lines = lines[data_start_index:]
+    records = []
+    
+    for line in data_lines:
+        line = line.strip()
+        # Ignorer les lignes vides ou les commentaires
+        if not line or line.startswith("~") or line.startswith("<"):
+            continue
+        
+        # Enlever le point-virgule final
+        line = line.rstrip(";").strip()
+        
+        # Séparer les valeurs par des espaces/tabulations
+        parts = line.split()
+        
+        if len(parts) >= 10:
+            try:
+                init_node = int(parts[0])
+                term_node = int(parts[1])
+                capacity = float(parts[2])
+                length = float(parts[3])
+                free_flow_time = float(parts[4])
+                b = float(parts[5])
+                power = float(parts[6])
+                speed = float(parts[7])
+                toll = float(parts[8])
+                link_type = int(parts[9])
+                
+                records.append([init_node, term_node, capacity, length, free_flow_time,
+                              b, power, speed, toll, link_type])
+            except ValueError:
+                continue  # Ignorer les lignes mal formatées
+    
+    columns = [
+        "init_node", "term_node", "capacity", "length", "free_flow_time",
+        "b", "power", "speed", "toll", "link_type"
+    ]
+    
+    return pd.DataFrame(records, columns=columns)
+
+def load_tntp_trips_barcelona(filepath):
+    """
+    Charge le fichier Barcelona_trips.tntp et retourne un DataFrame
+    avec les colonnes: O (origine), D (destination), demand
+    """
+    with open(filepath, "r") as f:
+        lines = f.readlines()
+    
+    # Trouver le début des données (après <END OF METADATA>)
+    data_start_index = None
+    for i, line in enumerate(lines):
+        if "<END OF METADATA>" in line:
+            data_start_index = i + 1
+            break
+    
+    if data_start_index is None:
+        raise ValueError("Impossible de trouver le début des données dans le fichier trips")
+    
+    data_lines = lines[data_start_index:]
+    records = []
+    current_origin = None
+    
+    for line in data_lines:
+        line = line.strip()
+        
+        # Ignorer les lignes vides
+        if not line:
+            continue
+        
+        # Détecter une nouvelle origine
+        if line.startswith("Origin"):
+            parts = line.split()
+            if len(parts) >= 2:
+                current_origin = int(parts[1])
+            continue
+        
+        # Parser les paires destination:demande
+        if current_origin is not None:
+            # Enlever le point-virgule final et séparer par point-virgule
+            line = line.rstrip(";").strip()
+            pairs = line.split(";")
+            
+            for pair in pairs:
+                pair = pair.strip()
+                if ":" in pair:
+                    try:
+                        dest_str, demand_str = pair.split(":")
+                        destination = int(dest_str.strip())
+                        demand = float(demand_str.strip())
+                        records.append([current_origin, destination, demand])
+                    except ValueError:
+                        continue  # Ignorer les paires mal formatées
+    
+    df = pd.DataFrame(records, columns=["O", "D", "demand"])
+    return df
